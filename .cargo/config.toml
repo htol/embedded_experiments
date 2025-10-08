@@ -1,0 +1,25 @@
+[build]
+target = "thumbv7m-none-eabi" # Cortex-M3
+
+rustflags = [
+  "-C", "linker=flip-link",
+  "-C", "link-arg=-Tlink.x",
+  "-C", "link-arg=-Tdefmt.x",
+  # This is needed if your flash or ram addresses are not aligned to 0x10000 in memory.x
+  # See https://github.com/rust-embedded/cortex-m-quickstart/pull/95
+  #"-C", "link-arg=--nmagic",
+
+]
+
+[target.thumbv7m-none-eabi]
+runner = "probe-rs run --chip stm32f103c8"
+
+[env]
+DEFMT_LOG = "trace" # <- can change to info, warn, or error
+
+[alias]
+# `cargo rb foo` will expand to `cargo run --bin foo`
+rb = "run --bin"
+# `cargo rrb foo` will expand to `cargo run --release --bin foo`
+rrb = "run --release --bin"
+

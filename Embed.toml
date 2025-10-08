@@ -1,0 +1,6 @@
+# cargo embed
+[default.general]
+chip = "stm32f103c8"
+
+[default.rtt]
+enabled = true
