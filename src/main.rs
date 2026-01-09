@@ -167,10 +167,10 @@ async fn main(spawner: Spawner) {
         }
     }
 
-    // Start Algorithm: Find "Knee" (> min + 200)
+    // Start Algorithm: Find "Knee" (> min + 50)
     let mut start_idx = min_idx;
     for i in min_idx..points.len() {
-        if points[i].2 > min_rpm + 200 {
+        if points[i].2 > min_rpm + 50 {
             start_idx = i;
             break;
         }
