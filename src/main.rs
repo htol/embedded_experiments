@@ -98,7 +98,7 @@ async fn main(spawner: Spawner) {
     let _ = display.clear().await;
 
     // --- Calibration Sequence ---
-    let line_cal = make_line("Status:", "Calib...");
+    let line_cal = make_line("Calibration...", "");
     display_line(&mut display, 0, 0, &line_cal).await;
 
     // Stop pump and wait 5s to settle
@@ -115,17 +115,13 @@ async fn main(spawner: Spawner) {
         let duty = pwm_period * percent as u32 / 100;
         pump.set_duty_override(duty);
 
-        // Display
-        let mut buf: heapless::String<LINE_LEN> = heapless::String::new();
-        let _ = write!(buf, "Calib: {}%", percent);
-        display_line(&mut display, 0, 0, &buf).await;
-
+        // Display - Line 1: "dt:XX% -> YYYY"
         Timer::after_millis(1500).await;
-
         let rpm = RPM.load(Ordering::Relaxed);
-        let mut buf_rpm: heapless::String<LINE_LEN> = heapless::String::new();
-        let _ = write!(buf_rpm, "rpm: {}", rpm);
-        display_line(&mut display, 0, 1, &buf_rpm).await;
+
+        let mut buf: heapless::String<LINE_LEN> = heapless::String::new();
+        let _ = write!(buf, "dt:{}% -> {}", percent, rpm);
+        display_line(&mut display, 0, 1, &buf).await;
 
         defmt::info!("Calib: {}% ({} ticks) -> {} RPM", percent, duty, rpm);
 
