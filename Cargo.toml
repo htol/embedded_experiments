@@ -23,7 +23,7 @@ embassy-stm32 = { version = "0.4", features = [
     "time-driver-any",
     "unstable-pac",
     "memory-x",
-    "exti"
+    "exti",
 ] }
 embassy-futures = { version = "0.1.0" }
 embassy-sync = { version = "0.6", features = ["defmt"] }

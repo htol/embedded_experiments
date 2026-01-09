@@ -10,6 +10,7 @@ use core::ptr;
 use core::sync::atomic::{AtomicU32, Ordering};
 use defmt;
 use embassy_executor::Spawner;
+use embassy_stm32::adc::{Adc, SampleTime};
 use embassy_stm32::exti::ExtiInput;
 use embassy_stm32::gpio::{AnyPin, Input, Level, Output, OutputType, Pin, Pull, Speed};
 use embassy_stm32::i2c::{I2c, Master};
@@ -25,6 +26,7 @@ use embassy_time::{Duration, Timer};
 use embedded_hal::digital::{OutputPin, StatefulOutputPin};
 use heapless::format;
 use heapless::String;
+use libm;
 use semihosting;
 
 use embedded_graphics::mono_font::ascii::FONT_10X20;
@@ -41,6 +43,7 @@ bind_interrupts!(struct Irqs {
     I2C2_EV => embassy_stm32::i2c::EventInterruptHandler<peripherals::I2C2>;
     I2C2_ER => embassy_stm32::i2c::ErrorInterruptHandler<peripherals::I2C2>;
     TIM3 => embassy_stm32::timer::CaptureCompareInterruptHandler<peripherals::TIM3>;
+    ADC1_2 => embassy_stm32::adc::InterruptHandler<peripherals::ADC1>;
 });
 
 pub fn exit() -> ! {
@@ -58,7 +61,7 @@ async fn main(spawner: Spawner) {
     // Clock mismatch: Software thinks 72MHz, Hardware is 8MHz (HSI).
     // Factor = 9.
 
-    let p = embassy_stm32::init(config);
+    let mut p = embassy_stm32::init(config);
     defmt::info!("System Init - Clock Mismatch Handled via Scaling");
 
     let led = Output::new(p.PC13, Level::High, Speed::Low);
@@ -95,6 +98,11 @@ async fn main(spawner: Spawner) {
         Default::default(),
     );
 
+    // ADC init
+    // ADC init - assume new takes 1 arg (delay might be internal or not needed?)
+    let mut adc = Adc::new(p.ADC1);
+    // adc.set_sample_time(SampleTime::Cycles71_5); // variant issue, using default
+
     // display
     let interface = I2CDisplayInterface::new(i2c);
     let mut display = Ssd1306Async::new(interface, DisplaySize128x64, DisplayRotation::Rotate0)
@@ -106,7 +114,7 @@ async fn main(spawner: Spawner) {
     let mut buf_title: heapless::String<16> = heapless::String::new();
 
     let _ = write!(buf_title, "Calibrating");
-    let mut buf_empty: heapless::String<16> = heapless::String::new();
+    let buf_empty: heapless::String<16> = heapless::String::new();
     draw_ui(&mut display, &buf_title, &buf_empty).await;
 
     // Stop pump and wait 5s to settle
@@ -203,7 +211,7 @@ async fn main(spawner: Spawner) {
     } else {
         let mut buf_fail: heapless::String<16> = heapless::String::new();
         let _ = write!(buf_fail, "Calib: Fail");
-        let mut buf_empty: heapless::String<16> = heapless::String::new();
+        let buf_empty: heapless::String<16> = heapless::String::new();
         draw_ui(&mut display, &buf_fail, &buf_empty).await;
         defmt::error!("Calibration Failed: Start >= End");
     }
@@ -213,6 +221,9 @@ async fn main(spawner: Spawner) {
     display.clear(BinaryColor::Off).unwrap();
     display.flush().await.unwrap();
     // --- End Calibration ---
+
+    // Initialize filter with first reading
+    let mut temp_filter: u16 = adc.read(&mut p.PA1).await;
 
     loop {
         pump.update();
@@ -232,7 +243,17 @@ async fn main(spawner: Spawner) {
         let _ = write!(buf_rpm, "RPM:  {}", current_rpm);
 
         let mut buf_duty: heapless::String<16> = heapless::String::new();
-        let _ = write!(buf_duty, "Duty: {}%", pct);
+
+        // Read Temp
+        // Read Temp with EMA Filter
+        let raw_temp = adc.read(&mut p.PA1).await;
+        // EMA: y[n] = (alpha * x[n]) + (1 - alpha) * y[n-1]
+        // Integer approx: (new + 7 * old) / 8
+        temp_filter = ((raw_temp as u32 + 7 * temp_filter as u32) / 8) as u16;
+
+        let temp_c = convert_to_celsius(temp_filter);
+
+        let _ = write!(buf_duty, "D:{}% {}C", pct, temp_c);
 
         draw_ui(&mut display, &buf_rpm, &buf_duty).await;
 
@@ -357,4 +378,34 @@ async fn draw_ui(
     if let Err(_) = display.flush().await {
         defmt::warn!("Display flush failed");
     }
+}
+
+fn convert_to_celsius(raw: u16) -> i32 {
+    const B: f32 = 3950.0;
+    const T0: f32 = 298.15;
+    const R0: f32 = 10000.0;
+    const R_PULLUP: f32 = 10000.0;
+    const MAX_ADC: f32 = 4095.0;
+
+    let val = raw as f32;
+    // Avoid division by zero or log(0)
+    if val >= MAX_ADC - 1.0 {
+        return -99;
+    }
+    if val < 1.0 {
+        return -99;
+    }
+
+    // Circuit: 3.3V -> 10k -> PA1 -> NTC -> GND
+    // Vout = Vcc * Rntc / (Rpu + Rntc)
+    // ADC = 4095 * Rntc / (Rpu + Rntc)
+    // Rntc = Rpu * ADC / (4095 - ADC)
+    let r_ntc = R_PULLUP * val / (MAX_ADC - val);
+
+    // Beta formula: 1/T = 1/T0 + 1/B * ln(R/R0)
+    let log_r = libm::logf(r_ntc / R0);
+    let temp_k = 1.0 / ((1.0 / T0) + (1.0 / B) * log_r);
+    let temp_c = temp_k - 273.15;
+
+    temp_c as i32
 }
