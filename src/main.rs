@@ -104,8 +104,7 @@ async fn main(spawner: Spawner) {
 
     // --- Calibration Sequence ---
     let mut buf_title: heapless::String<16> = heapless::String::new();
-    // "Calibration..." is 14 chars * 10 = 140 width > 128.
-    // "Calibrating" is 11 chars * 10 = 110 width < 128.
+
     let _ = write!(buf_title, "Calibrating");
     let mut buf_empty: heapless::String<16> = heapless::String::new();
     draw_ui(&mut display, &buf_title, &buf_empty).await;
@@ -128,10 +127,6 @@ async fn main(spawner: Spawner) {
         Timer::after_millis(1500).await;
         let rpm = RPM.load(Ordering::Relaxed);
 
-        // "100% -> 2200" is 12 chars = 120px <= 128.
-        // Alternative formats exceed width; using simple "XX% -> RPM" fits.
-        // "d:X% r:Y" (kept as reference for compact format)
-        // "100% -> 2200" = 12 chars = 120px. Perfect.
         let mut buf_data: heapless::String<16> = heapless::String::new();
         let _ = write!(buf_data, "{}% -> {}", percent, rpm);
         draw_ui(&mut display, &buf_title, &buf_data).await;
