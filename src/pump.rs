@@ -83,4 +83,13 @@ impl<'a, T: GeneralInstance4Channel, E: GeneralInstance4Channel> PumpController<
     pub fn target_percent(&self) -> u32 {
         self.target_percent
     }
+
+    pub fn get_duty_percentage(&self) -> u32 {
+        if self.max_duty <= self.min_duty {
+            return 0;
+        }
+        let range = self.max_duty - self.min_duty;
+        let offset = self.duty.saturating_sub(self.min_duty);
+        (offset * 100) / range
+    }
 }

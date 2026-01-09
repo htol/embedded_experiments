@@ -167,8 +167,17 @@ async fn main(spawner: Spawner) {
         }
     }
 
+    // Start Algorithm: Find "Knee" (> min + 200)
+    let mut start_idx = min_idx;
+    for i in min_idx..points.len() {
+        if points[i].2 > min_rpm + 200 {
+            start_idx = i;
+            break;
+        }
+    }
+
     // Limits
-    let start_duty = points[min_idx].1;
+    let start_duty = points[start_idx].1;
     let end_duty = points[max_idx].1;
 
     // Use conservative limits if detection fails
@@ -176,11 +185,11 @@ async fn main(spawner: Spawner) {
         pump.set_duty_limits(start_duty, end_duty);
 
         let mut buf: heapless::String<LINE_LEN> = heapless::String::new();
-        let _ = write!(buf, "Rng: {}-{}%", points[min_idx].0, points[max_idx].0);
+        let _ = write!(buf, "Rng: {}-{}%", points[start_idx].0, points[max_idx].0);
         display_line(&mut display, 0, 0, &buf).await;
         defmt::info!(
             "Detected Range: {}% - {}%",
-            points[min_idx].0,
+            points[start_idx].0,
             points[max_idx].0
         );
     } else {
@@ -206,11 +215,7 @@ async fn main(spawner: Spawner) {
             RPM.load(Ordering::Relaxed)
         };
 
-        let pct = if pump.min_duty() > 0 {
-            pump.duty() * 20 / pump.min_duty()
-        } else {
-            0
-        };
+        let pct = pump.get_duty_percentage();
 
         let mut buf: heapless::String<LINE_LEN> = heapless::String::new();
         let _ = write!(buf, "rpm: {} d: {}%", current_rpm, pct);
