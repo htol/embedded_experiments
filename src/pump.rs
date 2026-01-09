@@ -57,6 +57,17 @@ impl<'a, T: GeneralInstance4Channel, E: GeneralInstance4Channel> PumpController<
         self.pwm.ch1().set_duty_cycle(self.duty as u16);
     }
 
+    pub fn set_duty_limits(&mut self, min: u32, max: u32) {
+        self.min_duty = min;
+        self.max_duty = max;
+        self.duty = self.duty.clamp(min, max);
+    }
+
+    pub fn set_duty_override(&mut self, duty: u32) {
+        self.duty = duty;
+        self.pwm.ch1().set_duty_cycle(self.duty as u16);
+    }
+
     pub fn duty(&self) -> u32 {
         self.duty
     }
