@@ -27,7 +27,12 @@ use heapless::format;
 use heapless::String;
 use semihosting;
 
-use ssd1306::mode::{TerminalDisplaySizeAsync, TerminalModeAsync};
+use embedded_graphics::mono_font::ascii::FONT_10X20;
+use embedded_graphics::mono_font::MonoTextStyle;
+use embedded_graphics::pixelcolor::BinaryColor;
+use embedded_graphics::prelude::*;
+use embedded_graphics::text::{Baseline, Text};
+use ssd1306::mode::BufferedGraphicsModeAsync;
 use ssd1306::{prelude::*, I2CDisplayInterface, Ssd1306Async};
 use static_cell::StaticCell;
 use {defmt_rtt as _, panic_probe as _};
@@ -93,9 +98,126 @@ async fn main(spawner: Spawner) {
     // display
     let interface = I2CDisplayInterface::new(i2c);
     let mut display = Ssd1306Async::new(interface, DisplaySize128x64, DisplayRotation::Rotate0)
-        .into_terminal_mode();
+        .into_buffered_graphics_mode();
     display.init().await.unwrap();
-    let _ = display.clear().await;
+    display.clear(BinaryColor::Off).unwrap();
+
+    // --- Calibration Sequence ---
+    let mut buf_title: heapless::String<16> = heapless::String::new();
+    // "Calibration..." is 14 chars * 10 = 140 width > 128.
+    // "Calibrating" is 11 chars * 10 = 110 width < 128.
+    let _ = write!(buf_title, "Calibrating");
+    let mut buf_empty: heapless::String<16> = heapless::String::new();
+    draw_ui(&mut display, &buf_title, &buf_empty).await;
+
+    // Stop pump and wait 5s to settle
+    pump.set_duty_override(0);
+    Timer::after_millis(5000).await;
+
+    let pwm_period = 320; // 8MHz / 25kHz
+
+    // Store calibration points: (duty_percent, raw_duty, rpm)
+    let mut points: [(u8, u32, u32); 21] = [(0, 0, 0); 21];
+
+    // Sweep up
+    for (i, percent) in (0..=100).step_by(5).enumerate() {
+        let duty = pwm_period * percent as u32 / 100;
+        pump.set_duty_override(duty);
+
+        // Display - Line 1: "XX% -> RPM"
+        Timer::after_millis(1500).await;
+        let rpm = RPM.load(Ordering::Relaxed);
+
+        // "100% -> 2200" is 12 chars = 120px <= 128.
+        // Alternative formats exceed width; using simple "XX% -> RPM" fits.
+        // "d:X% r:Y" (kept as reference for compact format)
+        // "100% -> 2200" = 12 chars = 120px. Perfect.
+        let mut buf_data: heapless::String<16> = heapless::String::new();
+        let _ = write!(buf_data, "{}% -> {}", percent, rpm);
+        draw_ui(&mut display, &buf_title, &buf_data).await;
+
+        defmt::info!("Calib: {}% ({} ticks) -> {} RPM", percent, duty, rpm);
+
+        if i < 21 {
+            points[i] = (percent as u8, duty, rpm);
+        }
+    }
+
+    // Smart Range Detection
+    // 1. Find global Minimum RPM (The Valley)
+    let mut min_rpm = u32::MAX;
+    let mut min_idx = 0;
+
+    for (i, p) in points.iter().enumerate() {
+        if p.2 < min_rpm && p.2 > 0 {
+            min_rpm = p.2;
+            min_idx = i;
+        }
+    }
+
+    // 2. Find Max RPM (Saturation)
+    let mut max_rpm = 0;
+    for p in points.iter() {
+        if p.2 > max_rpm {
+            max_rpm = p.2;
+        }
+    }
+
+    // 3. Find Start (Min) and End (Max) Duty
+    // Start is at the Valley (min_idx)
+    // End is where we reach ~95% of Max RPM
+    let mut max_idx = 20;
+    let threshold = max_rpm * 95 / 100;
+
+    for (i, p) in points.iter().enumerate() {
+        if i >= min_idx && p.2 >= threshold {
+            max_idx = i;
+            break;
+        }
+    }
+
+    // Start Algorithm: Find "Knee" (> min + 50)
+    let mut start_idx = min_idx;
+    for i in min_idx..points.len() {
+        if points[i].2 > min_rpm + 50 {
+            start_idx = i;
+            break;
+        }
+    }
+
+    // Limits
+    let start_duty = points[start_idx].1;
+    let end_duty = points[max_idx].1;
+
+    // Use conservative limits if detection fails
+    if start_duty < end_duty {
+        pump.set_duty_limits(start_duty, end_duty);
+
+        let mut buf_rng: heapless::String<16> = heapless::String::new();
+        let _ = write!(
+            buf_rng,
+            "Rng: {}-{}%",
+            points[start_idx].0, points[max_idx].0
+        );
+        draw_ui(&mut display, &buf_title, &buf_rng).await;
+        defmt::info!(
+            "Detected Range: {}% - {}%",
+            points[start_idx].0,
+            points[max_idx].0
+        );
+    } else {
+        let mut buf_fail: heapless::String<16> = heapless::String::new();
+        let _ = write!(buf_fail, "Calib: Fail");
+        let mut buf_empty: heapless::String<16> = heapless::String::new();
+        draw_ui(&mut display, &buf_fail, &buf_empty).await;
+        defmt::error!("Calibration Failed: Start >= End");
+    }
+    Timer::after_millis(4000).await;
+
+    // Reset display for main loop
+    display.clear(BinaryColor::Off).unwrap();
+    display.flush().await.unwrap();
+    // --- End Calibration ---
 
     // --- Calibration Sequence ---
     let line_cal = make_line("Calibration...", "");
@@ -213,16 +335,13 @@ async fn main(spawner: Spawner) {
 
         let pct = pump.get_duty_percentage();
 
-        let mut buf: heapless::String<LINE_LEN> = heapless::String::new();
-        let _ = write!(buf, "rpm: {} d: {}%", current_rpm, pct);
-        display_line(&mut display, 0, 0, &buf).await;
+        let mut buf_rpm: heapless::String<16> = heapless::String::new();
+        let _ = write!(buf_rpm, "RPM:  {}", current_rpm);
 
-        // Clear line 2
-        let mut empty: heapless::String<LINE_LEN> = heapless::String::new();
-        for _ in 0..LINE_LEN {
-            let _ = empty.push(' ');
-        }
-        display_line(&mut display, 0, 1, &empty).await;
+        let mut buf_duty: heapless::String<16> = heapless::String::new();
+        let _ = write!(buf_duty, "Duty: {}%", pct);
+
+        draw_ui(&mut display, &buf_rpm, &buf_duty).await;
 
         // Small delay to prevent display/I2C from hogging the bus
         Timer::after_millis(50).await;
@@ -315,36 +434,34 @@ async fn led_task(mut led: Output<'static>) {
     }
 }
 
-const LINE_LEN: usize = 16; // line width in characters
+const LINE_LEN: usize = 16; // line width in characters (unused in graphics mode)
 
 // Function to format a fixed-length string
-fn make_line(prefix: &str, s: impl core::fmt::Display) -> heapless::String<LINE_LEN> {
-    let mut buf: heapless::String<LINE_LEN> = heapless::String::new();
-    let _ = write!(
-        buf,
-        "{}{:>width$}",
-        prefix,
-        s,
-        width = LINE_LEN - prefix.len()
-    );
-    buf
-}
-
-// Function to write a line to the display
-async fn display_line(
+// Helper to draw UI with 10x20 font
+async fn draw_ui(
     display: &mut Ssd1306Async<
         I2CInterface<I2c<'_, Async, Master>>,
         DisplaySize128x64,
-        TerminalModeAsync,
+        BufferedGraphicsModeAsync<DisplaySize128x64>,
     >,
-    col: u8,
-    row: u8,
-    line: &heapless::String<LINE_LEN>,
+    line1: &str,
+    line2: &str,
 ) {
-    if let Err(_) = display.set_position(col, row).await {
-        defmt::warn!("Failed to set cursor for line 1");
-    }
-    if let Err(_) = display.write_str(line).await {
-        defmt::warn!("Failed to write line to c: {}, r: {}:", col, row);
+    display.clear(BinaryColor::Off).unwrap();
+
+    let style = MonoTextStyle::new(&FONT_10X20, BinaryColor::On);
+
+    // Line 1 at (0, 15) - Baseline Top
+    Text::with_baseline(line1, Point::new(0, 0), style, Baseline::Top)
+        .draw(display)
+        .unwrap();
+
+    // Line 2 at (0, 35)
+    Text::with_baseline(line2, Point::new(0, 32), style, Baseline::Top)
+        .draw(display)
+        .unwrap();
+
+    if let Err(_) = display.flush().await {
+        defmt::warn!("Display flush failed");
     }
 }
