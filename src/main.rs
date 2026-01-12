@@ -110,117 +110,148 @@ async fn main(spawner: Spawner) {
     display.init().await.unwrap();
     display.clear(BinaryColor::Off).unwrap();
 
-    // --- Calibration Sequence ---
-    let mut buf_title: heapless::String<16> = heapless::String::new();
+    // --- Hybrid Calibration / Default Sequence ---
+    // Button on PB12 (Input with PullUp)
+    // - Low (Pressed): Run Calibration Sweep
+    // - High (Released): Use Hardcoded Defaults (15% - 45%)
 
-    let _ = write!(buf_title, "Calibrating");
-    let buf_empty: heapless::String<16> = heapless::String::new();
-    draw_ui(&mut display, &buf_title, &buf_empty).await;
+    let calib_button = Input::new(p.PB12, Pull::Up);
+    let perform_calib = calib_button.is_low();
 
-    // Stop pump and wait 5s to settle
-    pump.set_duty_override(0);
-    Timer::after_millis(5000).await;
-
+    // Default values: 15% and 45% of 320
+    // 320 * 0.15 = 48
+    // 320 * 0.45 = 144
+    let mut start_duty: u32 = 48;
+    let mut end_duty: u32 = 144;
     let pwm_period = 320; // 8MHz / 25kHz
 
-    // Store calibration points: (duty_percent, raw_duty, rpm)
-    let mut points: [(u8, u32, u32); 21] = [(0, 0, 0); 21];
+    if perform_calib {
+        let mut buf_title: heapless::String<16> = heapless::String::new();
 
-    // Sweep up
-    for (i, percent) in (0..=100).step_by(5).enumerate() {
-        let duty = pwm_period * percent as u32 / 100;
-        pump.set_duty_override(duty);
-
-        // Display - Line 1: "XX% -> RPM"
-        Timer::after_millis(1500).await;
-        let rpm = RPM.load(Ordering::Relaxed);
-
-        let mut buf_data: heapless::String<16> = heapless::String::new();
-        let _ = write!(buf_data, "{}% -> {}", percent, rpm);
-        draw_ui(&mut display, &buf_title, &buf_data).await;
-
-        defmt::info!("Calib: {}% ({} ticks) -> {} RPM", percent, duty, rpm);
-
-        if i < 21 {
-            points[i] = (percent as u8, duty, rpm);
-        }
-    }
-
-    // Smart Range Detection
-    // 1. Find global Minimum RPM (The Valley)
-    let mut min_rpm = u32::MAX;
-    let mut min_idx = 0;
-
-    for (i, p) in points.iter().enumerate() {
-        if p.2 < min_rpm && p.2 > 0 {
-            min_rpm = p.2;
-            min_idx = i;
-        }
-    }
-
-    // 2. Find Max RPM (Saturation)
-    let mut max_rpm = 0;
-    for p in points.iter() {
-        if p.2 > max_rpm {
-            max_rpm = p.2;
-        }
-    }
-
-    // 3. Find Start (Min) and End (Max) Duty
-    // Start is at the Valley (min_idx)
-    // End is where we reach ~95% of Max RPM
-    let mut max_idx = 20;
-    let threshold = max_rpm * 95 / 100;
-
-    for (i, p) in points.iter().enumerate() {
-        if i >= min_idx && p.2 >= threshold {
-            max_idx = i;
-            break;
-        }
-    }
-
-    // Start Algorithm: Find "Knee" (> min + 50)
-    let mut start_idx = min_idx;
-    for i in min_idx..points.len() {
-        if points[i].2 > min_rpm + 50 {
-            start_idx = i;
-            break;
-        }
-    }
-
-    // Limits
-    let start_duty = points[start_idx].1;
-    let end_duty = points[max_idx].1;
-
-    // Use conservative limits if detection fails
-    if start_duty < end_duty {
-        pump.set_duty_limits(start_duty, end_duty);
-
-        let mut buf_rng: heapless::String<16> = heapless::String::new();
-        let _ = write!(
-            buf_rng,
-            "Rng: {}-{}%",
-            points[start_idx].0, points[max_idx].0
-        );
-        draw_ui(&mut display, &buf_title, &buf_rng).await;
-        defmt::info!(
-            "Detected Range: {}% - {}%",
-            points[start_idx].0,
-            points[max_idx].0
-        );
-    } else {
-        let mut buf_fail: heapless::String<16> = heapless::String::new();
-        let _ = write!(buf_fail, "Calib: Fail");
+        let _ = write!(buf_title, "Calibrating");
         let buf_empty: heapless::String<16> = heapless::String::new();
-        draw_ui(&mut display, &buf_fail, &buf_empty).await;
-        defmt::error!("Calibration Failed: Start >= End");
-    }
-    Timer::after_millis(4000).await;
+        draw_ui(&mut display, &buf_title, &buf_empty).await;
 
-    // Reset display for main loop
+        // Stop pump and wait 5s to settle
+        pump.set_duty_override(0);
+        Timer::after_millis(5000).await;
+
+        // Store calibration points: (duty_percent, raw_duty, rpm)
+        let mut points: [(u8, u32, u32); 21] = [(0, 0, 0); 21];
+
+        // Sweep up
+        for (i, percent) in (0..=100).step_by(5).enumerate() {
+            let duty = pwm_period * percent as u32 / 100;
+            pump.set_duty_override(duty);
+
+            // Display - Line 1: "XX% -> RPM"
+            Timer::after_millis(1500).await;
+            let rpm = RPM.load(Ordering::Relaxed);
+
+            let mut buf_data: heapless::String<16> = heapless::String::new();
+            let _ = write!(buf_data, "{}% -> {}", percent, rpm);
+            draw_ui(&mut display, &buf_title, &buf_data).await;
+
+            defmt::info!("Calib: {}% ({} ticks) -> {} RPM", percent, duty, rpm);
+
+            if i < 21 {
+                points[i] = (percent as u8, duty, rpm);
+            }
+        }
+
+        // Smart Range Detection
+        // 1. Find global Minimum RPM (The Valley)
+        let mut min_rpm = u32::MAX;
+        let mut min_idx = 0;
+
+        for (i, p) in points.iter().enumerate() {
+            if p.2 < min_rpm && p.2 > 0 {
+                min_rpm = p.2;
+                min_idx = i;
+            }
+        }
+
+        // 2. Find Max RPM (Saturation)
+        let mut max_rpm = 0;
+        for p in points.iter() {
+            if p.2 > max_rpm {
+                max_rpm = p.2;
+            }
+        }
+
+        // 3. Find Start (Min) and End (Max) Duty
+        // Start is at the Valley (min_idx)
+        // End is where we reach ~95% of Max RPM
+        let mut max_idx = 20;
+        let threshold = max_rpm * 95 / 100;
+
+        for (i, p) in points.iter().enumerate() {
+            if i >= min_idx && p.2 >= threshold {
+                max_idx = i;
+                break;
+            }
+        }
+
+        // Start Algorithm: Find "Knee" (> min + 50)
+        let mut start_idx = min_idx;
+        for i in min_idx..points.len() {
+            if points[i].2 > min_rpm + 50 {
+                start_idx = i;
+                break;
+            }
+        }
+
+        // Potential Limits
+        let s_duty = points[start_idx].1;
+        let e_duty = points[max_idx].1;
+
+        // Validate
+        if s_duty < e_duty {
+            start_duty = s_duty;
+            end_duty = e_duty;
+
+            let mut buf_rng: heapless::String<16> = heapless::String::new();
+            let _ = write!(
+                buf_rng,
+                "Rng: {}-{}%",
+                points[start_idx].0, points[max_idx].0
+            );
+            draw_ui(&mut display, &buf_title, &buf_rng).await;
+            defmt::info!(
+                "Detected Range: {}% - {}%",
+                points[start_idx].0,
+                points[max_idx].0
+            );
+        } else {
+            let mut buf_fail: heapless::String<16> = heapless::String::new();
+            let _ = write!(buf_fail, "Calib: Fail");
+            let buf_empty: heapless::String<16> = heapless::String::new();
+            draw_ui(&mut display, &buf_fail, &buf_empty).await;
+            defmt::error!("Calibration Failed: Start >= End. Using defaults.");
+            // Keep the initialized defaults
+        }
+        Timer::after_millis(4000).await;
+
+        // Reset display after calibration
+        display.clear(BinaryColor::Off).unwrap();
+        display.flush().await.unwrap();
+    } else {
+        defmt::info!(
+            "Skipping Calibration. Button not pressed. Using defaults: 15% (48) - 45% (144)"
+        );
+    }
+
+    // Apply the limits (Either calculated or default)
+    pump.set_duty_limits(start_duty, end_duty);
+
+    // Set initial speed to 50% of the working range
+    let mid_duty = (start_duty + end_duty) / 2 - (end_duty - start_duty) * 5 / 100;
+    pump.set_duty_override(mid_duty);
+
+    // Ensure display is clear before loop
     display.clear(BinaryColor::Off).unwrap();
     display.flush().await.unwrap();
-    // --- End Calibration ---
+    // --- End Startup Logic ---
 
     // Initialize filter with first reading
     let mut temp_filter: u16 = adc.read(&mut p.PA1).await;
