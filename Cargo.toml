@@ -31,7 +31,7 @@ embassy-sync = { version = "0.6", features = ["defmt"] }
 embedded-hal = "1.0.0"
 embedded-hal-async = { version = "1.0.0" }
 embedded-graphics = "0.8"
-ssd1306 = { version = "0.10", features = ["async"]}
+ssd1306 = { version = "0.10" }
 heapless = "0.9"
 static_cell = "2.0"
 libm = "0.2"

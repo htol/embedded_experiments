@@ -14,7 +14,7 @@ use embassy_stm32::adc::{Adc, SampleTime};
 use embassy_stm32::exti::ExtiInput;
 use embassy_stm32::gpio::{AnyPin, Input, Level, Output, OutputType, Pin, Pull, Speed};
 use embassy_stm32::i2c::{I2c, Master};
-use embassy_stm32::mode::Async;
+use embassy_stm32::mode::Blocking;
 use embassy_stm32::rcc::{self, Hse, HseMode, Pll, PllSource};
 use embassy_stm32::time::{hz, khz, Hertz};
 use embassy_stm32::timer::low_level::CountingMode;
@@ -22,7 +22,7 @@ use embassy_stm32::timer::qei::{Qei, QeiPin};
 use embassy_stm32::timer::simple_pwm::{PwmPin, SimplePwm};
 use embassy_stm32::timer::{CaptureCompareInterruptHandler, Channel};
 use embassy_stm32::{bind_interrupts, pac, peripherals, Config};
-use embassy_time::{Duration, Timer};
+use embassy_time::{with_timeout, Duration, Timer};
 use embedded_hal::digital::{OutputPin, StatefulOutputPin};
 use heapless::format;
 use heapless::String;
@@ -34,8 +34,10 @@ use embedded_graphics::mono_font::MonoTextStyle;
 use embedded_graphics::pixelcolor::BinaryColor;
 use embedded_graphics::prelude::*;
 use embedded_graphics::text::{Baseline, Text};
-use ssd1306::mode::BufferedGraphicsModeAsync;
-use ssd1306::{prelude::*, I2CDisplayInterface, Ssd1306Async};
+use ssd1306::mode::BufferedGraphicsMode;
+use ssd1306::{prelude::*, I2CDisplayInterface, Ssd1306};
+
+// ... existing imports ...
 use static_cell::StaticCell;
 use {defmt_rtt as _, panic_probe as _};
 
@@ -88,15 +90,10 @@ async fn main(spawner: Spawner) {
     spawner.spawn(tach_task(p.TIM3, p.PA6, p.EXTI6)).unwrap();
 
     // i2c
-    let i2c = embassy_stm32::i2c::I2c::new(
-        p.I2C2,
-        p.PB10,
-        p.PB11,
-        Irqs,
-        p.DMA1_CH4,
-        p.DMA1_CH5,
-        Default::default(),
-    );
+    let mut i2c_config = embassy_stm32::i2c::Config::default();
+    i2c_config.frequency = khz(100);
+    i2c_config.timeout = embassy_time::Duration::from_millis(100); // Hardware timeout too
+    let i2c = embassy_stm32::i2c::I2c::new_blocking(p.I2C2, p.PB10, p.PB11, i2c_config);
 
     // ADC init
     // ADC init - assume new takes 1 arg (delay might be internal or not needed?)
@@ -105,9 +102,9 @@ async fn main(spawner: Spawner) {
 
     // display
     let interface = I2CDisplayInterface::new(i2c);
-    let mut display = Ssd1306Async::new(interface, DisplaySize128x64, DisplayRotation::Rotate0)
+    let mut display = Ssd1306::new(interface, DisplaySize128x64, DisplayRotation::Rotate0)
         .into_buffered_graphics_mode();
-    display.init().await.unwrap();
+    display.init().unwrap();
     display.clear(BinaryColor::Off).unwrap();
 
     // --- Hybrid Calibration / Default Sequence ---
@@ -130,7 +127,9 @@ async fn main(spawner: Spawner) {
 
         let _ = write!(buf_title, "Calibrating");
         let buf_empty: heapless::String<16> = heapless::String::new();
-        draw_ui(&mut display, &buf_title, &buf_empty).await;
+        if let Err(_) = draw_ui(&mut display, &buf_title, &buf_empty) {
+            defmt::warn!("Display failed during calib init");
+        };
 
         // Stop pump and wait 5s to settle
         pump.set_duty_override(0);
@@ -150,7 +149,7 @@ async fn main(spawner: Spawner) {
 
             let mut buf_data: heapless::String<16> = heapless::String::new();
             let _ = write!(buf_data, "{}% -> {}", percent, rpm);
-            draw_ui(&mut display, &buf_title, &buf_data).await;
+            let _ = draw_ui(&mut display, &buf_title, &buf_data);
 
             defmt::info!("Calib: {}% ({} ticks) -> {} RPM", percent, duty, rpm);
 
@@ -216,7 +215,7 @@ async fn main(spawner: Spawner) {
                 "Rng: {}-{}%",
                 points[start_idx].0, points[max_idx].0
             );
-            draw_ui(&mut display, &buf_title, &buf_rng).await;
+            let _ = draw_ui(&mut display, &buf_title, &buf_rng);
             defmt::info!(
                 "Detected Range: {}% - {}%",
                 points[start_idx].0,
@@ -226,7 +225,7 @@ async fn main(spawner: Spawner) {
             let mut buf_fail: heapless::String<16> = heapless::String::new();
             let _ = write!(buf_fail, "Calib: Fail");
             let buf_empty: heapless::String<16> = heapless::String::new();
-            draw_ui(&mut display, &buf_fail, &buf_empty).await;
+            let _ = draw_ui(&mut display, &buf_fail, &buf_empty);
             defmt::error!("Calibration Failed: Start >= End. Using defaults.");
             // Keep the initialized defaults
         }
@@ -234,7 +233,7 @@ async fn main(spawner: Spawner) {
 
         // Reset display after calibration
         display.clear(BinaryColor::Off).unwrap();
-        display.flush().await.unwrap();
+        display.flush().unwrap();
     } else {
         defmt::info!(
             "Skipping Calibration. Button not pressed. Using defaults: 15% (48) - 45% (144)"
@@ -250,7 +249,7 @@ async fn main(spawner: Spawner) {
 
     // Ensure display is clear before loop
     display.clear(BinaryColor::Off).unwrap();
-    display.flush().await.unwrap();
+    display.flush().unwrap();
     // --- End Startup Logic ---
 
     // Initialize filter with first reading
@@ -286,7 +285,17 @@ async fn main(spawner: Spawner) {
 
         let _ = write!(buf_duty, "D:{}% {}C", pct, temp_c);
 
-        draw_ui(&mut display, &buf_rpm, &buf_duty).await;
+        // Timeout set to 100ms for display update via blocking driver (handled by driver timeout)
+        if let Err(_) = draw_ui(&mut display, &buf_rpm, &buf_duty) {
+            defmt::warn!("Display Error! Re-initializing...");
+            Timer::after_millis(500).await;
+            if let Err(_) = display.init() {
+                defmt::error!("Display Re-init failed configuration");
+            } else {
+                // Settling time for display controller after init
+                Timer::after_millis(100).await;
+            }
+        }
 
         // Small delay to prevent display/I2C from hogging the bus
         Timer::after_millis(50).await;
@@ -381,17 +390,15 @@ async fn led_task(mut led: Output<'static>) {
 
 const LINE_LEN: usize = 16; // line width in characters (unused in graphics mode)
 
-// Function to format a fixed-length string
 // Helper to draw UI with 10x20 font
-async fn draw_ui(
-    display: &mut Ssd1306Async<
-        I2CInterface<I2c<'_, Async, Master>>,
-        DisplaySize128x64,
-        BufferedGraphicsModeAsync<DisplaySize128x64>,
-    >,
+fn draw_ui<DI>(
+    display: &mut Ssd1306<DI, DisplaySize128x64, BufferedGraphicsMode<DisplaySize128x64>>,
     line1: &str,
     line2: &str,
-) {
+) -> Result<(), ()>
+where
+    DI: WriteOnlyDataCommand,
+{
     display.clear(BinaryColor::Off).unwrap();
 
     let style = MonoTextStyle::new(&FONT_10X20, BinaryColor::On);
@@ -406,8 +413,12 @@ async fn draw_ui(
         .draw(display)
         .unwrap();
 
-    if let Err(_) = display.flush().await {
-        defmt::warn!("Display flush failed");
+    match display.flush() {
+        Ok(_) => Ok(()),
+        Err(_) => {
+            defmt::warn!("Display flush failed");
+            Err(())
+        }
     }
 }
 
